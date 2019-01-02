@@ -6,6 +6,12 @@ import numpy as np
 import time
 from simple_pid import PID
 
+"""
+https://github.com/damiafuentes/DJITelloPy
+https://www.pyimagesearch.com/2016/02/01/opencv-center-of-contour/
+https://github.com/m-lundberg/simple-pid
+"""
+
 # Speed of the drone
 S = 60
 # Frames per second of the pygame window display
@@ -48,9 +54,13 @@ class FrontEnd(object):
         self.target = []
         self.mode = "Manual"
         self.pid_x = PID()
-        self.pid_x.tunings = (.1, 0, 1)
+        self.pid_x.tunings = (.12, 0, .9) #(.1, 0, 1)
         self.pid_x.setpoint = self.screen_width / 2
-        self.pid_x.output_limits = (-30, 30)
+        self.pid_x.output_limits = (-40, 40)
+        self.pid_y = PID()
+        self.pid_y.tunings = (.15, 0.1, .8)
+        self.pid_y.setpoint = self.screen_height / 2
+        self.pid_y.output_limits = (-40, 40)
 
         # Drone HUD
         self.show_flight_data = False
@@ -107,7 +117,7 @@ class FrontEnd(object):
             frame = cv2.flip( frame, 1 )
 
             if self.mode == "Seek" or self.mode == "Track":
-                self.maode = "Seek"
+                self.mode = "Seek"
                 frameGray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 frameGray = cv2.GaussianBlur(frameGray, (5, 5), 0)
                 croped_threshold = []
@@ -145,7 +155,7 @@ class FrontEnd(object):
             
             if self.show_flight_data:
                 frame = self.flight_data(frame)
-            frame = cv2.circle(frame, (self.screen_width/2, self.screen_height/2), 30, 100)
+            frame = cv2.circle(frame, (self.screen_width/2, self.screen_height/2), 30, 100, 4)
             frame = np.rot90(frame)
             frame = pygame.surfarray.make_surface(frame)
             self.screen.blit(frame, (0, 0))
@@ -172,11 +182,14 @@ class FrontEnd(object):
         x_control_signal = int(np.clip(P_gain_x * abs(x_error), 10, 30)) * (int(x_error > 0) - int(x_error < 0))
         y_control_signal = int(np.clip(P_gain_y * abs(y_error), 10, 30)) * (int(y_error > 0) - int(y_error < 0))
         x_control_signal_pid = self.pid_x(actual[0])
+        y_control_signal_pid = self.pid_y(actual[1])
         #self.left_right_velocity = x_control_signal
         self.left_right_velocity = int(x_control_signal_pid)
-        print(x_control_signal, x_control_signal_pid)
-        self.up_down_velocity = y_control_signal
-        return [x_control_signal_pid, y_control_signal, distance_to_target]
+        print("X", x_control_signal, x_control_signal_pid)
+        #self.up_down_velocity = y_control_signal
+        self.up_down_velocity = int(y_control_signal_pid)
+        print("Y", y_control_signal, y_control_signal_pid)
+        return [x_control_signal_pid, y_control_signal_pid, distance_to_target]
 
     def flight_data(self, img):
         font                   = cv2.FONT_HERSHEY_SIMPLEX
@@ -247,6 +260,9 @@ class FrontEnd(object):
                 self.show_flight_data = False
             else:
                 self.show_flight_data = True
+        elif key == pygame.K_u:  # set yaw counter clockwise velocity
+            self.pid_x.Kp += .1
+            print(self.pid_x.Kp)
 
     def keyup(self, key):
         """ Update velocities based on key released
@@ -278,7 +294,7 @@ class FrontEnd(object):
             self.seek_target()
         elif self.mode == "Track":
             self.hover()
-            print(self.PID_control([self.screen_width/2, self.screen_height/2], self.target))
+            self.PID_control([self.screen_width/2, self.screen_height/2], self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:
