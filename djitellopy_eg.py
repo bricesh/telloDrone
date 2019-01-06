@@ -148,14 +148,14 @@ class FrontEnd(object):
                                     if cnt_to_cropped_cnt_ratio >= 3.5 and cnt_to_cropped_cnt_ratio <= 4.5:
                                         cv2.drawContours(frame, [approx], 0, (0), 5)
                                         self.mode = "Track"
-                                        self.target = [min_x + (max_x-min_x)/2, min_y + (max_y-min_y)/2]
+                                        self.target = [int(min_x + (max_x-min_x)/2), int(min_y + (max_y-min_y)/2)]
                                         frame = cv2.drawMarker(frame, tuple(self.target), 200, cv2.MARKER_CROSS)
                                 else:
                                     croped_threshold = []
             
             if self.show_flight_data:
                 frame = self.flight_data(frame)
-            frame = cv2.circle(frame, (self.screen_width/2, self.screen_height/2), 30, 100, 4)
+            frame = cv2.circle(frame, (int(self.screen_width/2), int(self.screen_height/2)), 30, 100, 4)
             frame = np.rot90(frame)
             frame = pygame.surfarray.make_surface(frame)
             self.screen.blit(frame, (0, 0))
@@ -204,7 +204,8 @@ class FrontEnd(object):
             font, 
             fontScale,
             fontColor,
-            lineType)
+            lineType,
+            cv2.LINE_AA)
         return cv2.flip( img, 1 )
     
     def hover(self):
