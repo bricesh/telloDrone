@@ -2,6 +2,7 @@ import numpy as np
 import os
 import tensorflow as tf
 import cv2
+import time
 
 cap = cv2.VideoCapture(1)
 
@@ -49,7 +50,13 @@ with detection_graph.as_default():
       (boxes, scores, classes, num_detections) = sess.run(
           [boxes, scores, classes, num_detections],
           feed_dict={image_tensor: image_np_expanded})
-      norm_target = (boxes[0][0][1]+(boxes[0][0][3]-boxes[0][0][1])/2, boxes[0][0][0]+(boxes[0][0][2]-boxes[0][0][0])/2)
+      try:
+        target_index = np.where(classes[0] == 43.)[0][0]  #43 = Tennis Racket
+        norm_target_coord = (boxes[0][target_index][1]+(boxes[0][target_index][3]-boxes[0][target_index][1])/2, boxes[0][target_index][0]+(boxes[0][target_index][2]-boxes[0][target_index][0])/2)
+        print(classes[0][target_index], scores[0][target_index], norm_target_coord)
+      except:
+        target_index = -1
+      
       # Visualization of the results of a detection.
       # vis_util.visualize_boxes_and_labels_on_image_array(
       #     image_np,
@@ -61,8 +68,10 @@ with detection_graph.as_default():
       #     line_thickness=8)
 
       image_np = cv2.resize(image_np, (800,600))
-      image_np = cv2.drawMarker(image_np, (int(800 * norm_target[0]), int(600 * norm_target[1])), 200, cv2.MARKER_CROSS)
+      if target_index != -1:
+        image_np = cv2.drawMarker(image_np, (int(800 * norm_target_coord[0]), int(600 * norm_target_coord[1])), 200, cv2.MARKER_CROSS)
       cv2.imshow('object detection', image_np)
       if cv2.waitKey(25) & 0xFF == ord('q'):
         cv2.destroyAllWindows()
         break
+      time.sleep(1 / 25) # Could improve taking into account time to execute code...
