@@ -70,13 +70,14 @@ class FrontEnd(object):
         self.target = []
         self.mode = "Manual"    #Auto, Seek, Manual, Track
         self.pid_x = PID()
-        self.pid_x.tunings = (.12, 0, .9) #(.1, 0, 1)
+        self.pid_x.tunings = (.1, 0, 1) #(.1, 0, 1)
         self.pid_x.setpoint = self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
         self.pid_y.tunings = (.15, 0.1, .8)
         self.pid_y.setpoint = self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
+        self.joystick_engaged = False
 
         # Drone HUD
         self.show_flight_data = False
@@ -124,6 +125,11 @@ class FrontEnd(object):
                                 self.keydown(event.key)
                         elif event.type == KEYUP:
                             self.keyup(event.key)
+                        elif event.type == MOUSEBUTTONDOWN:
+                            self.joystick_engaged = True
+                        elif event.type == MOUSEBUTTONUP:
+                            self.joystick_engaged = False
+                            self.hover()
 
                     if frame_read.stopped:
                         frame_read.stop()
@@ -137,7 +143,7 @@ class FrontEnd(object):
 
                     if self.mode == "Seek" or self.mode == "Track":
                         #self.mode = "Seek"
-                        print(self.mode)
+                        #print(self.mode)
 
                         # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
                         image_np_expanded = np.expand_dims(frame_small, axis=0)
@@ -153,7 +159,6 @@ class FrontEnd(object):
                         (boxes, classes) = sess.run(
                             [boxes, classes],
                             feed_dict={image_tensor: image_np_expanded})
-                        print(classes)
                         try:
                             target_index = np.where(classes[0] == 47.)[0][0]  #43 = Tennis Racket, 47 = Cup
                             norm_target_coord = (boxes[0][target_index][1]+(boxes[0][target_index][3]-boxes[0][target_index][1])/2, boxes[0][target_index][0]+(boxes[0][target_index][2]-boxes[0][target_index][0])/2)
@@ -184,13 +189,12 @@ class FrontEnd(object):
     #    return ((a_x - b_x)**2 + (a_y - b_y)**2)**.5
 
     def PID_control(self, set_point, actual):
-        print(actual)
         x_control_signal_pid = self.pid_x(actual[0])
         y_control_signal_pid = self.pid_y(actual[1])
         self.left_right_velocity = int(x_control_signal_pid)
-        print("X control command", x_control_signal_pid)
+        #print("X control command", x_control_signal_pid)
         self.up_down_velocity = int(y_control_signal_pid)
-        print("Y control command", y_control_signal_pid)
+        #print("Y control command", y_control_signal_pid)
         return
 
     def flight_data(self, img):
@@ -215,6 +219,16 @@ class FrontEnd(object):
         self.for_back_velocity = 0
         self.up_down_velocity = 0
         self.yaw_velocity = 0
+        return
+
+    def fly_with_mouse(self):
+        mouse_pos = pygame.mouse.get_pos()
+        x_vel = (mouse_pos[0] - (self.screen_width/2))/8
+        self.left_right_velocity = int(x_vel)
+        y_vel = -(mouse_pos[1] - (self.screen_height/2))/6
+        self.up_down_velocity = int(y_vel)
+        print(x_vel,y_vel)
+        return
 
     def seek_target(self):
         self.yaw_velocity = self.seek_speed
@@ -229,6 +243,7 @@ class FrontEnd(object):
             self.tick = 0
         if self.tick == 15:
             self.up_down_velocity = 0
+        return
 
     def keydown(self, key):
         """ Update velocities based on key pressed
@@ -289,6 +304,9 @@ class FrontEnd(object):
             self.send_rc_control = False
 
     def update(self):
+        if self.joystick_engaged == True:
+            self.fly_with_mouse()
+
         if self.mode == "Auto":
             self.hover()
             self.mode = "Seek"
