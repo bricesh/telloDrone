@@ -195,7 +195,6 @@ class FrontEnd(object):
         #print("X control command", x_control_signal_pid)
         self.up_down_velocity = int(y_control_signal_pid)
         #print("Y control command", y_control_signal_pid)
-        return
 
     def flight_data(self, img):
         font                   = cv2.FONT_HERSHEY_SIMPLEX
@@ -219,7 +218,6 @@ class FrontEnd(object):
         self.for_back_velocity = 0
         self.up_down_velocity = 0
         self.yaw_velocity = 0
-        return
 
     def fly_with_mouse(self):
         mouse_pos = pygame.mouse.get_pos()
@@ -228,7 +226,6 @@ class FrontEnd(object):
         y_vel = -(mouse_pos[1] - (self.screen_height/2))/6
         self.up_down_velocity = int(y_vel)
         print(x_vel,y_vel)
-        return
 
     def seek_target(self):
         self.yaw_velocity = self.seek_speed
@@ -243,7 +240,6 @@ class FrontEnd(object):
             self.tick = 0
         if self.tick == 15:
             self.up_down_velocity = 0
-        return
 
     def keydown(self, key):
         """ Update velocities based on key pressed
