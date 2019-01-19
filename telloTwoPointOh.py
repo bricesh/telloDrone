@@ -60,7 +60,7 @@ class FrontEnd(object):
         self.speed = 10
 
         # Drone Auto Pilot
-        self.tick = 0
+        self.target_aquired_tick = 0
         self.seek_speed = 40
         self.target = []
         self.mode = "Manual"    #Seek, Manual, Track
@@ -72,24 +72,24 @@ class FrontEnd(object):
         self.pid_y.tunings = (.15, 0.1, .8)
         self.pid_y.setpoint = self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
-        self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/4
+        self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/20
         self.pid_z.tunings = (.1, 0, 1)
         self.pid_z.setpoint = (self.screen_height * self.screen_width) / 20  #5% of screen
         self.pid_z.output_limits = (-40, 40)
-        #depth control somehow needs to take the shape of the object into account e.g. long an thin...
 
         # Virtual joystick control
-        self.joystick_engaged = False
+        #self.joystick_engaged = False
 
         # Instantiate OCV kalman filter
         self.kf = cv2.KalmanFilter(4, 2)
         self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
         self.kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
+        # TODO improve model to include depth
 
         # Drone HUD
         self.show_flight_data = False
         self.detect_target = False
-        self.target_detected = False
+        self.target_aquired = False
 
         # Only engage RC once take off command sent
         self.send_rc_control = False
@@ -149,13 +149,14 @@ class FrontEnd(object):
                     self.screen.fill([0, 0, 0])
 
                     self.frame = cv2.cvtColor(frame_read.frame, cv2.COLOR_BGR2RGB)
+
+                    if self.show_flight_data:
+                        self.flight_data()
+
                     self.frame = cv2.flip(self.frame, 1)            
 
                     if self.detect_target:
-                        self.detectTarget(sess)
-                    
-                    if self.show_flight_data:
-                        self.frame = self.flight_data(self.frame)
+                        self.get_target(sess)                 
                     
                     self.frame = cv2.circle(self.frame, (int(self.screen_width/2), int(self.screen_height/2)), 30, 100, 4)
                     self.frame = np.rot90(self.frame)
@@ -168,10 +169,7 @@ class FrontEnd(object):
         # Call it always before finishing. I deallocate resources.
         self.tello.end()
 
-    #def distance(self, a_x, a_y, b_x, b_y):
-    #    return ((a_x - b_x)**2 + (a_y - b_y)**2)**.5
-
-    def detectTarget(self, sess):
+    def get_target(self, sess):
         frame_small = cv2.resize(self.frame, (int(self.screen_width/2),int(self.screen_height/2)))
         # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
         image_np_expanded = np.expand_dims(frame_small, axis=0)
@@ -189,27 +187,19 @@ class FrontEnd(object):
                 self.screen_width * boxes[0][target_index][3],
                 self.screen_height * boxes[0][target_index][0],
                 self.screen_height * boxes[0][target_index][2])
-            print(target_area, target_area_coord, target_centroid)
         except:
             target_index = -1
         
         if target_index != -1:
-            self.target_detected = True
+            self.target_aquired = True
+            self.target_aquired_tick = 0
             if self.mode == "Seek":
                 self.mode = "Track"
 
             self.target = [target_centroid[0], target_centroid[1], target_area]
 
-            # print(self.target)
-            # print(self.pid_x.setpoint,
-            #     self.pid_y.setpoint,
-            #     self.pid_z.setpoint)
-            # print(abs(self.target[0] - self.pid_x.setpoint),
-            #     abs(self.target[1] - self.pid_y.setpoint),
-            #     abs(self.target[2] - self.pid_z.setpoint))
-
             if (abs(self.target[0] - self.pid_x.setpoint) < 20 and 
-                abs(self.target[1] - self.pid_y.setpoint) < 20) and
+                abs(self.target[1] - self.pid_y.setpoint) < 20 and
                 abs(self.target[2] - self.pid_z.setpoint) < 4000):
                 marker_col = (0, 255, 0)
             else:
@@ -217,17 +207,29 @@ class FrontEnd(object):
             self.frame = cv2.drawMarker(self.frame, (self.target[0], self.target[1]), marker_col, cv2.MARKER_CROSS)
             self.frame = cv2.rectangle(self.frame, target_area_coord[0], target_area_coord[1], marker_col, 2)
         
-        if self.target_detected == True:
+        if self.target_aquired == True:
             # Target previoulsly detected but could be temporarely lost.
             # If not lost, update kalmann state with measurement
             # If lost, predict position using kalmann filter.
+            # If lost for more than 10 frames, transition to "Seek" mode
             if target_index != -1:
                 measured = np.array([[np.float32(self.target[0])], [np.float32(self.target[1])]])
                 self.kf.correct(measured)
                 kf_target = self.kf.predict()
+                marker_col = (200, 0, 0)
             else:
+                self.target_aquired_tick += 1
                 kf_target = self.kf.predict()
-            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), 300, cv2.MARKER_SQUARE)
+                marker_col = (0, 255, 0)
+            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), marker_col, cv2.MARKER_SQUARE)
+
+            if self.target_aquired_tick < 10:
+                self.target = [kf_target[0,0], kf_target[1,0], self.pid_z.setpoint] #need to pass predicted area
+            else:
+                self.target_aquired = False
+                if self.mode == "Track":
+                    self.mode = "Seek"
+                    print(self.mode)
 
     def target_area_coord_centroid(self, x1, x2, y1, y2):
         # Returns the centroid of the given coordinates, the area of the square created by the smallest side
@@ -248,25 +250,24 @@ class FrontEnd(object):
 
     def PID_control(self, actual):
         self.set_velocities(left_right_vel = int(self.pid_x(actual[0])),
-                            up_down_vel = int(self.pid_x(actual[1])),
-                            for_back_vel = int(self.pid_x(actual[2])))
+                            up_down_vel = int(self.pid_y(actual[1])),
+                            for_back_vel = int(self.pid_z(actual[2])))
 
-    def flight_data(self, img):
-        font                   = cv2.FONT_HERSHEY_SIMPLEX
-        bottomLeftCornerOfText = (10,700)
-        fontScale              = 1
-        fontColor              = (255,255,255)
-        lineType               = 2
+    def flight_data(self):
+        # Expand to show more data from tello
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        bot_left_corner_txt = (10,700)
+        font_scale = 1
+        font_color = (255,255,255)
+        line_type = 2
 
-        img = cv2.flip( img, 1 )
-        cv2.putText(img,self.tello.get_battery(), 
-            bottomLeftCornerOfText, 
+        cv2.putText(self.frame,self.tello.get_battery(), 
+            bot_left_corner_txt, 
             font, 
-            fontScale,
-            fontColor,
-            lineType,
+            font_scale,
+            font_color,
+            line_type,
             cv2.LINE_AA)
-        return cv2.flip( img, 1 )
     
     def set_velocities(self, left_right_vel = 999, for_back_vel = 999, up_down_vel = 999, yaw_vel = 999):
         # Only function where velocities are set. Only set vel if value is not 999.
