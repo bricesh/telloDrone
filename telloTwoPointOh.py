@@ -56,10 +56,7 @@ class FrontEnd(object):
         self.tello = Tello()
 
         # Drone velocities between -100~100
-        self.for_back_velocity = 0
-        self.left_right_velocity = 0
-        self.up_down_velocity = 0
-        self.yaw_velocity = 0
+        self.set_velocities() #hover
         self.speed = 10
 
         # Drone Auto Pilot
@@ -77,7 +74,7 @@ class FrontEnd(object):
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/4
         self.pid_z.tunings = (.1, 0, 1)
-        self.pid_z.setpoint = (self.screen_height * self.screen_width) / 4
+        self.pid_z.setpoint = (self.screen_height * self.screen_width) / 20  #5% of screen
         self.pid_z.output_limits = (-40, 40)
         #depth control somehow needs to take the shape of the object into account e.g. long an thin...
 
@@ -139,11 +136,11 @@ class FrontEnd(object):
                                 self.keydown(event.key)
                         elif event.type == KEYUP:
                             self.keyup(event.key)
-                        elif event.type == MOUSEBUTTONDOWN:
-                            self.joystick_engaged = True
-                        elif event.type == MOUSEBUTTONUP:
-                            self.joystick_engaged = False
-                            self.hover()
+                        # elif event.type == MOUSEBUTTONDOWN:
+                        #     self.joystick_engaged = True
+                        # elif event.type == MOUSEBUTTONUP:
+                        #     self.joystick_engaged = False
+                        #     self.set_velocities(0, 0, 0, 0) #hover
 
                     if frame_read.stopped:
                         frame_read.stop()
@@ -187,10 +184,12 @@ class FrontEnd(object):
             feed_dict={image_tensor: image_np_expanded})
         try:
             target_index = np.where(classes[0] == 44.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
-            norm_target_coord = (boxes[0][target_index][1]+(boxes[0][target_index][3]-boxes[0][target_index][1])/2,
-                                    boxes[0][target_index][0]+(boxes[0][target_index][2]-boxes[0][target_index][0])/2)
-            norm_target_area = (boxes[0][target_index][3] - boxes[0][target_index][1]) * (boxes[0][target_index][2] - boxes[0][target_index][0])
-            print(norm_target_area)
+            target_area, target_area_coord, target_centroid = self.target_area_coord_centroid(
+                self.screen_width * boxes[0][target_index][1],
+                self.screen_width * boxes[0][target_index][3],
+                self.screen_height * boxes[0][target_index][0],
+                self.screen_height * boxes[0][target_index][2])
+            print(target_area, target_area_coord, target_centroid)
         except:
             target_index = -1
         
@@ -199,38 +198,58 @@ class FrontEnd(object):
             if self.mode == "Seek":
                 self.mode = "Track"
 
-            self.target = [int(self.screen_width * norm_target_coord[0]),
-                            int(self.screen_height * norm_target_coord[1]),
-                            int(self.screen_width * self.screen_height * norm_target_area)]
-            print(self.target)
-            print(self.pid_x.setpoint, self.pid_y.setpoint, self.pid_z.setpoint)
-            print(abs(self.target[0] - self.pid_x.setpoint), abs(self.target[1] - self.pid_y.setpoint), abs(self.target[2] - self.pid_z.setpoint))
+            self.target = [target_centroid[0], target_centroid[1], target_area]
+
+            # print(self.target)
+            # print(self.pid_x.setpoint,
+            #     self.pid_y.setpoint,
+            #     self.pid_z.setpoint)
+            # print(abs(self.target[0] - self.pid_x.setpoint),
+            #     abs(self.target[1] - self.pid_y.setpoint),
+            #     abs(self.target[2] - self.pid_z.setpoint))
+
             if (abs(self.target[0] - self.pid_x.setpoint) < 20 and 
-                abs(self.target[1] - self.pid_y.setpoint) < 20):# and
-                #abs(self.target[2] - self.pid_z.setpoint) < 4000):
+                abs(self.target[1] - self.pid_y.setpoint) < 20) and
+                abs(self.target[2] - self.pid_z.setpoint) < 4000):
                 marker_col = (0, 255, 0)
             else:
                 marker_col = (200, 0, 0)
-            print(marker_col)
             self.frame = cv2.drawMarker(self.frame, (self.target[0], self.target[1]), marker_col, cv2.MARKER_CROSS)
+            self.frame = cv2.rectangle(self.frame, target_area_coord[0], target_area_coord[1], marker_col, 2)
         
         if self.target_detected == True:
+            # Target previoulsly detected but could be temporarely lost.
+            # If not lost, update kalmann state with measurement
+            # If lost, predict position using kalmann filter.
             if target_index != -1:
                 measured = np.array([[np.float32(self.target[0])], [np.float32(self.target[1])]])
                 self.kf.correct(measured)
                 kf_target = self.kf.predict()
             else:
                 kf_target = self.kf.predict()
-            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), 300, cv2.MARKER_SQUARE) #300 = green
+            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), 300, cv2.MARKER_SQUARE)
 
-    def Estimate(self, coordX, coordY):
-        ''' This function estimates the position of the object'''
-        measured = np.array([[np.float32(coordX)], [np.float32(coordY)]])
-        self.kf.correct(measured)
-        return self.kf.predict()
+    def target_area_coord_centroid(self, x1, x2, y1, y2):
+        # Returns the centroid of the given coordinates, the area of the square created by the smallest side
+        # and the coordinates of the latter
+        area = None
+        coord1 = None
+        coord2 = None
+        centroid = (int(x1 + (x2 - x1) / 2), int(y1 + (y2 - y1) / 2))
+        if (x2 - x1) <= (y2 - y1):
+            area = int((x2 - x1)**2)
+            coord1 = (int(centroid[0] - ((x2 - x1) / 2)), int(centroid[1] - ((x2 - x1) / 2)))
+            coord2 = (int(centroid[0] + ((x2 - x1) / 2)), int(centroid[1] + ((x2 - x1) / 2)))
+        else:
+            area = int((y2 - y1)**2)
+            coord1 = (int(centroid[0] - ((y2 - y1) / 2)), int(centroid[1] - ((y2 - y1) / 2)))
+            coord2 = (int(centroid[0] + ((y2 - y1) / 2)), int(centroid[1] + ((y2 - y1) / 2)))
+        return area, (coord1, coord2), centroid
 
     def PID_control(self, actual):
-        return (int(self.pid_x(actual[0])), int(self.pid_y(actual[1])), int(self.pid_z(actual[2])))
+        self.set_velocities(left_right_vel = int(self.pid_x(actual[0])),
+                            up_down_vel = int(self.pid_x(actual[1])),
+                            for_back_vel = int(self.pid_x(actual[2])))
 
     def flight_data(self, img):
         font                   = cv2.FONT_HERSHEY_SIMPLEX
@@ -249,31 +268,40 @@ class FrontEnd(object):
             cv2.LINE_AA)
         return cv2.flip( img, 1 )
     
-    def hover(self):
-        self.left_right_velocity = 0
-        self.for_back_velocity = 0
-        self.up_down_velocity = 0
-        self.yaw_velocity = 0
+    def set_velocities(self, left_right_vel = 999, for_back_vel = 999, up_down_vel = 999, yaw_vel = 999):
+        # Only function where velocities are set. Only set vel if value is not 999.
+        # This means can set one DoF without affecting other.
+        # If called with all zeros values, corresponds to hovering
+        if left_right_vel != 999:
+            self.left_right_velocity = left_right_vel
+        if for_back_vel != 999:
+            self.for_back_velocity = for_back_vel
+        if up_down_vel != 999:
+            self.up_down_velocity = up_down_vel
+        if yaw_vel != 999:
+            self.yaw_velocity = yaw_vel
 
-    def fly_with_mouse(self):
-        mouse_pos = pygame.mouse.get_pos()
-        x_vel = (mouse_pos[0] - (self.screen_width/2))/8    # maxes out at +60 or -60
-        y_vel = -(mouse_pos[1] - (self.screen_height/2))/6  # maxes out at +60 or -60
-        return (int(x_vel), int(y_vel))
+    # def fly_with_mouse(self):
+    #     mouse_pos = pygame.mouse.get_pos()
+    #     x_vel = (mouse_pos[0] - (self.screen_width/2))/8    # maxes out at +60 or -60
+    #     y_vel = -(mouse_pos[1] - (self.screen_height/2))/6  # maxes out at +60 or -60
+    #     self.set_velocities(left_right_vel = int(x_vel), up_down_vel = int(y_vel))
 
     def seek_target(self):
-        self.yaw_velocity = self.seek_speed
+        seek_tick = 0
+        seek_speed = 40
+        self.set_velocities(yaw_vel = seek_speed)
         # 20 = 39s
         # 30 = 22s
         # 40 = 14s
         # 50 = 10s
 
-        self.tick += 1
-        if self.tick == 220:
-            self.up_down_velocity = self.seek_speed
-            self.tick = 0
-        if self.tick == 15:
-            self.up_down_velocity = 0
+        seek_tick += 1
+        if seek_tick == 220:
+            self.set_velocities(up_down_vel = seek_speed)
+            seek_tick = 0
+        if seek_tick == 15:
+            self.set_velocities(up_down_vel = 0)
 
     def keydown(self, key):
         """ Update velocities based on key pressed
@@ -281,28 +309,27 @@ class FrontEnd(object):
             key: pygame key
         """
         if key == pygame.K_UP:  # set forward velocity
-            self.for_back_velocity = S
+            self.set_velocities(for_back_vel = S)
         elif key == pygame.K_DOWN:  # set backward velocity
-            self.for_back_velocity = -S
+            self.set_velocities(for_back_vel = -S)
         elif key == pygame.K_LEFT:  # set left velocity
-            self.left_right_velocity = -S
+            self.set_velocities(left_right_vel = -S)
         elif key == pygame.K_RIGHT:  # set right velocity
-            self.left_right_velocity = S
+            self.set_velocities(left_right_vel = S)
         elif key == pygame.K_w:  # set up velocity
-            self.up_down_velocity = S
+            self.set_velocities(up_down_vel = S)
         elif key == pygame.K_s:  # set down velocity
-            self.up_down_velocity = -S
+            self.set_velocities(up_down_vel = -S)
         elif key == pygame.K_a:  # set yaw clockwise velocity
-            self.yaw_velocity = -S
+            self.set_velocities(yaw_vel = -S)
         elif key == pygame.K_d:  # set yaw counter clockwise velocity
-            self.yaw_velocity = S
+            self.set_velocities(yaw_vel = S)
         elif key == pygame.K_m:  # toggle auto pilot on
-            self.hover()
+            self.set_velocities(0, 0, 0, 0) #hover
             if self.mode != "Manual":
                 self.mode = "Manual"
             else:
                 self.mode = "Seek"
-                self.tick = 0
             print(self.mode)
         elif key == pygame.K_o:  # toggle show flight data
             self.show_flight_data = not self.show_flight_data
@@ -315,13 +342,13 @@ class FrontEnd(object):
             key: pygame key
         """
         if key == pygame.K_UP or key == pygame.K_DOWN:  # set zero forward/backward velocity
-            self.for_back_velocity = 0
+            self.set_velocities(for_back_vel = 0)
         elif key == pygame.K_LEFT or key == pygame.K_RIGHT:  # set zero left/right velocity
-            self.left_right_velocity = 0
+            self.set_velocities(left_right_vel = 0)
         elif key == pygame.K_w or key == pygame.K_s:  # set zero up/down velocity
-            self.up_down_velocity = 0
+            self.set_velocities(up_down_vel = 0)
         elif key == pygame.K_a or key == pygame.K_d:  # set zero yaw velocity
-            self.yaw_velocity = 0
+            self.set_velocities(yaw_vel = 0)
         elif key == pygame.K_t:  # takeoff
             self.tello.takeoff()
             self.send_rc_control = True
@@ -330,21 +357,23 @@ class FrontEnd(object):
             self.send_rc_control = False
 
     def update(self):
-        if self.joystick_engaged == True:
-            (self.left_right_velocity, self.up_down_velocity) = self.fly_with_mouse()
+        # if self.joystick_engaged == True:
+        #     self.fly_with_mouse()
 
         if self.mode == "Seek":
-            self.hover()
+            self.set_velocities(0 ,0, 0, 0) #hover
             self.target = []
             self.seek_target()
         elif self.mode == "Track":
-            self.hover()
-            (self.left_right_velocity, self.up_down_velocity, self.for_back_velocity) = self.PID_control(self.target)
+            self.set_velocities(0, 0, 0, 0) #hover
+            self.PID_control(self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:
-            self.tello.send_rc_control(self.left_right_velocity, self.for_back_velocity, self.up_down_velocity,
-                                       self.yaw_velocity)
+            self.tello.send_rc_control(self.left_right_velocity,
+                                        self.for_back_velocity,
+                                        self.up_down_velocity,
+                                        self.yaw_velocity)
 
 def main():
     frontend = FrontEnd()
