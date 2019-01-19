@@ -75,10 +75,11 @@ class FrontEnd(object):
         self.pid_y.tunings = (.15, 0.1, .8)
         self.pid_y.setpoint = self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
-        #self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/4
-        #self.pid_z.tunings = (.1, 0, 0)
-        #self.pid_z.setpoint = (self.screen_height * self.screen_width) / 4
-        #self.pid_z.output_limits = (-40, 40)
+        self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/4
+        self.pid_z.tunings = (.1, 0, 1)
+        self.pid_z.setpoint = (self.screen_height * self.screen_width) / 4
+        self.pid_z.output_limits = (-40, 40)
+        #depth control somehow needs to take the shape of the object into account e.g. long an thin...
 
         # Virtual joystick control
         self.joystick_engaged = False
@@ -185,9 +186,11 @@ class FrontEnd(object):
             [boxes, classes],
             feed_dict={image_tensor: image_np_expanded})
         try:
-            target_index = np.where(classes[0] == 47.)[0][0]  #43 = Tennis Racket, 47 = Cup
+            target_index = np.where(classes[0] == 44.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
             norm_target_coord = (boxes[0][target_index][1]+(boxes[0][target_index][3]-boxes[0][target_index][1])/2,
                                     boxes[0][target_index][0]+(boxes[0][target_index][2]-boxes[0][target_index][0])/2)
+            norm_target_area = (boxes[0][target_index][3] - boxes[0][target_index][1]) * (boxes[0][target_index][2] - boxes[0][target_index][0])
+            print(norm_target_area)
         except:
             target_index = -1
         
@@ -197,8 +200,19 @@ class FrontEnd(object):
                 self.mode = "Track"
 
             self.target = [int(self.screen_width * norm_target_coord[0]),
-                            int(self.screen_height * norm_target_coord[1])]
-            self.frame = cv2.drawMarker(self.frame, tuple(self.target), 200, cv2.MARKER_CROSS)
+                            int(self.screen_height * norm_target_coord[1]),
+                            int(self.screen_width * self.screen_height * norm_target_area)]
+            print(self.target)
+            print(self.pid_x.setpoint, self.pid_y.setpoint, self.pid_z.setpoint)
+            print(abs(self.target[0] - self.pid_x.setpoint), abs(self.target[1] - self.pid_y.setpoint), abs(self.target[2] - self.pid_z.setpoint))
+            if (abs(self.target[0] - self.pid_x.setpoint) < 20 and 
+                abs(self.target[1] - self.pid_y.setpoint) < 20):# and
+                #abs(self.target[2] - self.pid_z.setpoint) < 4000):
+                marker_col = (0, 255, 0)
+            else:
+                marker_col = (200, 0, 0)
+            print(marker_col)
+            self.frame = cv2.drawMarker(self.frame, (self.target[0], self.target[1]), marker_col, cv2.MARKER_CROSS)
         
         if self.target_detected == True:
             if target_index != -1:
@@ -207,7 +221,7 @@ class FrontEnd(object):
                 kf_target = self.kf.predict()
             else:
                 kf_target = self.kf.predict()
-            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), 300, cv2.MARKER_SQUARE)
+            self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), 300, cv2.MARKER_SQUARE) #300 = green
 
     def Estimate(self, coordX, coordY):
         ''' This function estimates the position of the object'''
@@ -215,8 +229,8 @@ class FrontEnd(object):
         self.kf.correct(measured)
         return self.kf.predict()
 
-    def PID_control(self, set_point, actual):
-        return (int(self.pid_x(actual[0])), int(self.pid_y(actual[1])))
+    def PID_control(self, actual):
+        return (int(self.pid_x(actual[0])), int(self.pid_y(actual[1])), int(self.pid_z(actual[2])))
 
     def flight_data(self, img):
         font                   = cv2.FONT_HERSHEY_SIMPLEX
@@ -325,8 +339,7 @@ class FrontEnd(object):
             self.seek_target()
         elif self.mode == "Track":
             self.hover()
-            (self.left_right_velocity, self.up_down_velocity) = self.PID_control([self.screen_width/2, self.screen_height/2],
-                                                                                    self.target)
+            (self.left_right_velocity, self.up_down_velocity, self.for_back_velocity) = self.PID_control(self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:
