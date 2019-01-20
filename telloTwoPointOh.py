@@ -4,6 +4,7 @@ import numpy as np
 import time
 import os
 import tensorflow as tf
+import logging
 
 from djitellopy import Tello
 from utils import label_map_util
@@ -13,7 +14,11 @@ from simple_pid import PID
 # Speed of the drone
 S = 60
 # Frames per second of the pygame window display
-FPS = 20
+FPS = 20 # --> means an update every 50 ms
+# Logging setup
+log_file_name = 'logs/blackbox-' + time.strftime('%d_%b_%Y_%H_%M_%S') + '.log'
+logging.basicConfig(filename=log_file_name, format='%(asctime)s;%(message)s', level=logging.INFO)
+logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_area')
 
 class FrontEnd(object):
     """ Maintains the Tello display and moves it through the keyboard keys.
@@ -27,6 +32,7 @@ class FrontEnd(object):
             - M toggle between Manual and 'Auto Pilot' modes
             - O display flight data
             - U toggle target detection
+            - P toggle logging
     """
 
     def __init__(self):
@@ -55,27 +61,33 @@ class FrontEnd(object):
         # Init Tello object that interacts with the Tello drone
         self.tello = Tello()
 
+        # Logging init
+        self.log_to_blackbox = False
+        self.log_sess_id = 0
+
         # Drone velocities between -100~100
-        self.set_velocities() #hover
+        self.set_velocities(0, 0, 0, 0) #hover
         self.speed = 10
 
         # Drone Auto Pilot
         self.target_aquired_tick = 0
         self.seek_speed = 40
+        self.seek_tick = 0
         self.target = []
         self.mode = "Manual"    #Seek, Manual, Track
         self.pid_x = PID()
-        self.pid_x.tunings = (.1, 0, 1) #(.1, 0, 1)
+        self.pid_x.tunings = (1.44/50, 0.72/100, 0.072*1.5) #(.1, 0, 1)
         self.pid_x.setpoint = self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
-        self.pid_y.tunings = (.15, 0.1, .8)
+        self.pid_y.tunings = (1.44/50, 0.72/1000, 0.072*1.5)
         self.pid_y.setpoint = self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/20
-        self.pid_z.tunings = (.1, 0, 1)
-        self.pid_z.setpoint = (self.screen_height * self.screen_width) / 20  #5% of screen
+        self.pid_z.tunings = (.0001, 0, 0.001)
+        self.pid_z.setpoint = int((self.screen_height * self.screen_width) / 20)  #5% of screen
         self.pid_z.output_limits = (-40, 40)
+        # Improve by normalising the measurements and actuals!!
 
         # Virtual joystick control
         #self.joystick_engaged = False
@@ -84,7 +96,7 @@ class FrontEnd(object):
         self.kf = cv2.KalmanFilter(4, 2)
         self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
         self.kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-        # TODO improve model to include depth
+        # TODO improve model to include depth: position measurement std = 4
 
         # Drone HUD
         self.show_flight_data = False
@@ -181,7 +193,7 @@ class FrontEnd(object):
             [boxes, classes],
             feed_dict={image_tensor: image_np_expanded})
         try:
-            target_index = np.where(classes[0] == 44.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
+            target_index = np.where(classes[0] == 47.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
             target_area, target_area_coord, target_centroid = self.target_area_coord_centroid(
                 self.screen_width * boxes[0][target_index][1],
                 self.screen_width * boxes[0][target_index][3],
@@ -208,10 +220,12 @@ class FrontEnd(object):
             self.frame = cv2.rectangle(self.frame, target_area_coord[0], target_area_coord[1], marker_col, 2)
         
         if self.target_aquired == True:
-            # Target previoulsly detected but could be temporarely lost.
-            # If not lost, update kalmann state with measurement
-            # If lost, predict position using kalmann filter.
-            # If lost for more than 10 frames, transition to "Seek" mode
+            """
+            Target previoulsly detected but could be temporarely lost.
+            If not lost, update kalmann state with measurement
+            If lost, predict position using kalmann filter.
+            If lost for more than 10 frames, transition to "Seek" mode
+            """
             if target_index != -1:
                 measured = np.array([[np.float32(self.target[0])], [np.float32(self.target[1])]])
                 self.kf.correct(measured)
@@ -221,19 +235,20 @@ class FrontEnd(object):
                 self.target_aquired_tick += 1
                 kf_target = self.kf.predict()
                 marker_col = (0, 255, 0)
+                if self.target_aquired_tick < 5:
+                    self.target = [int(kf_target[0,0]), int(kf_target[1,0]), self.pid_z.setpoint] #need to pass predicted area
+                else:
+                    self.target_aquired = False
+                    self.target = []
+                    if self.mode == "Track":
+                        self.mode = "Seek"
             self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), marker_col, cv2.MARKER_SQUARE)
 
-            if self.target_aquired_tick < 10:
-                self.target = [kf_target[0,0], kf_target[1,0], self.pid_z.setpoint] #need to pass predicted area
-            else:
-                self.target_aquired = False
-                if self.mode == "Track":
-                    self.mode = "Seek"
-                    print(self.mode)
-
     def target_area_coord_centroid(self, x1, x2, y1, y2):
-        # Returns the centroid of the given coordinates, the area of the square created by the smallest side
-        # and the coordinates of the latter
+        """
+        Returns the centroid of the given coordinates, the area of the square created by the smallest side
+        and the coordinates of the latter
+        """
         area = None
         coord1 = None
         coord2 = None
@@ -249,12 +264,21 @@ class FrontEnd(object):
         return area, (coord1, coord2), centroid
 
     def PID_control(self, actual):
+        pid_yaw_vel = 0
+        if actual[0] < 100:
+            pid_yaw_vel = -30
+        if actual[0] > self.screen_width - 100:
+            pid_yaw_vel = 30
+
         self.set_velocities(left_right_vel = int(self.pid_x(actual[0])),
                             up_down_vel = int(self.pid_y(actual[1])),
-                            for_back_vel = int(self.pid_z(actual[2])))
+                            for_back_vel = int(self.pid_z(actual[2])),
+                            yaw_vel = pid_yaw_vel)
 
     def flight_data(self):
-        # Expand to show more data from tello
+        """
+        Expand to show more data from tello
+        """
         font = cv2.FONT_HERSHEY_SIMPLEX
         bot_left_corner_txt = (10,700)
         font_scale = 1
@@ -270,9 +294,11 @@ class FrontEnd(object):
             cv2.LINE_AA)
     
     def set_velocities(self, left_right_vel = 999, for_back_vel = 999, up_down_vel = 999, yaw_vel = 999):
-        # Only function where velocities are set. Only set vel if value is not 999.
-        # This means can set one DoF without affecting other.
-        # If called with all zeros values, corresponds to hovering
+        """
+        Only function where velocities are set. Only set vel if value is not 999.
+        This means can set one DoF without affecting other.
+        If called with all zeros values, corresponds to hovering
+        """
         if left_right_vel != 999:
             self.left_right_velocity = left_right_vel
         if for_back_vel != 999:
@@ -289,19 +315,26 @@ class FrontEnd(object):
     #     self.set_velocities(left_right_vel = int(x_vel), up_down_vel = int(y_vel))
 
     def seek_target(self):
-        seek_tick = 0
+        """
+        Executes a hardcoded search pattern:
+            1. Clockwise 360 deg at current height
+            2. Up for 1 second
+            3. back to 1.
+        """
         seek_speed = 40
         self.set_velocities(yaw_vel = seek_speed)
+        # Timings for a complete 360 deg at various rotational velocities
         # 20 = 39s
         # 30 = 22s
         # 40 = 14s
         # 50 = 10s
 
-        seek_tick += 1
-        if seek_tick == 220:
+        self.seek_tick += 1
+        if self.seek_tick == 220:
             self.set_velocities(up_down_vel = seek_speed)
-            seek_tick = 0
-        if seek_tick == 15:
+            self.seek_tick = 0
+            print("up!!")
+        if self.seek_tick == 15:
             self.set_velocities(up_down_vel = 0)
 
     def keydown(self, key):
@@ -331,11 +364,17 @@ class FrontEnd(object):
                 self.mode = "Manual"
             else:
                 self.mode = "Seek"
-            print(self.mode)
         elif key == pygame.K_o:  # toggle show flight data
             self.show_flight_data = not self.show_flight_data
         elif key == pygame.K_u:  # toggle detect object
             self.detect_target = not self.detect_target
+        elif key == pygame.K_p:  # toggle logging and increament session id
+            self.log_to_blackbox = not self.log_to_blackbox
+            if self.log_to_blackbox:
+                print('logging on')
+                self.log_sess_id += 1
+            else:
+                print('logging off')
 
     def keyup(self, key):
         """ Update velocities based on key released
@@ -363,7 +402,7 @@ class FrontEnd(object):
 
         if self.mode == "Seek":
             self.set_velocities(0 ,0, 0, 0) #hover
-            self.target = []
+            self.seek_tick = 0
             self.seek_target()
         elif self.mode == "Track":
             self.set_velocities(0, 0, 0, 0) #hover
@@ -375,7 +414,27 @@ class FrontEnd(object):
                                         self.for_back_velocity,
                                         self.up_down_velocity,
                                         self.yaw_velocity)
-
+        
+        if self.log_to_blackbox:
+            try:
+                logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
+                        self.log_sess_id,
+                        self.mode,
+                        self.left_right_velocity,
+                        self.for_back_velocity,
+                        self.up_down_velocity,
+                        self.yaw_velocity,
+                        self.target[0],
+                        self.target[1],
+                        self.target[2])
+            except:
+                logging.info('%s;%s;%s;%s;%s;%s',
+                        self.log_sess_id,
+                        self.mode,
+                        self.left_right_velocity,
+                        self.for_back_velocity,
+                        self.up_down_velocity,
+                        self.yaw_velocity)
 def main():
     frontend = FrontEnd()
 
