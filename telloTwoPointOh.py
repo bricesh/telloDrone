@@ -210,9 +210,9 @@ class FrontEnd(object):
 
             self.target = [target_centroid[0], target_centroid[1], target_area]
 
-            if (abs(self.target[0] - self.pid_x.setpoint) < 20 and 
-                abs(self.target[1] - self.pid_y.setpoint) < 20 and
-                abs(self.target[2] - self.pid_z.setpoint) < 4000):
+            if (abs(self.target[0] - (self.pid_x.setpoint * self.screen_width)) < 20 and 
+                abs(self.target[1] - (self.pid_y.setpoint * self.screen_height)) < 20 and
+                abs(self.target[2] - (self.pid_z.setpoint * self.screen_width * self.screen_height)) < 4000):
                 marker_col = (0, 255, 0)
             else:
                 marker_col = (200, 0, 0)
@@ -410,6 +410,7 @@ class FrontEnd(object):
         if self.mode == "Seek":
             self.set_velocities(0 ,0, 0, 0) #hover
             self.seek_tick = 0
+            self.detect_target = True
             self.seek_target()
         elif self.mode == "Track":
             self.set_velocities(0, 0, 0, 0) #hover
