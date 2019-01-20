@@ -76,16 +76,16 @@ class FrontEnd(object):
         self.target = []
         self.mode = "Manual"    #Seek, Manual, Track
         self.pid_x = PID()
-        self.pid_x.tunings = (1.44/50, 0.72/100, 0.072*1.5) #(.1, 0, 1)
-        self.pid_x.setpoint = self.screen_width / 2
+        self.pid_x.tunings = (100, 0, 50) #(.1, 0, 1)
+        self.pid_x.setpoint = 0.5 #self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
-        self.pid_y.tunings = (1.44/50, 0.72/1000, 0.072*1.5)
-        self.pid_y.setpoint = self.screen_height / 2
+        self.pid_y.tunings = (100, 0, 30)
+        self.pid_y.setpoint = 0.5 #self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/20
-        self.pid_z.tunings = (.0001, 0, 0.001)
-        self.pid_z.setpoint = int((self.screen_height * self.screen_width) / 20)  #5% of screen
+        self.pid_z.tunings = (500, 0, 100)
+        self.pid_z.setpoint = 0.05 #int((self.screen_height * self.screen_width) / 20)  #5% of screen
         self.pid_z.output_limits = (-40, 40)
         # Improve by normalising the measurements and actuals!!
 
@@ -230,7 +230,7 @@ class FrontEnd(object):
                 measured = np.array([[np.float32(self.target[0])], [np.float32(self.target[1])]])
                 self.kf.correct(measured)
                 kf_target = self.kf.predict()
-                marker_col = (200, 0, 0)
+                marker_col = (0, 0, 255)
             else:
                 self.target_aquired_tick += 1
                 kf_target = self.kf.predict()
@@ -264,15 +264,22 @@ class FrontEnd(object):
         return area, (coord1, coord2), centroid
 
     def PID_control(self, actual):
+        # Normalise actuals
+        norm_actuals = [actual[0] / (self.screen_width * 1.0),
+            actual[1] / (self.screen_height * 1.0),
+            actual[2] / (self.screen_width * self.screen_height * 1.0)]
+
+        # If detected object in first or last 10% of the width of the screen, 
+        # then rotate left and right respectively
         pid_yaw_vel = 0
-        if actual[0] < 100:
+        if norm_actuals[0] <= .1:
             pid_yaw_vel = -30
-        if actual[0] > self.screen_width - 100:
+        if norm_actuals[0] >= .9:
             pid_yaw_vel = 30
 
-        self.set_velocities(left_right_vel = int(self.pid_x(actual[0])),
-                            up_down_vel = int(self.pid_y(actual[1])),
-                            for_back_vel = int(self.pid_z(actual[2])),
+        self.set_velocities(left_right_vel = int(self.pid_x(norm_actuals[0])),
+                            up_down_vel = int(self.pid_y(norm_actuals[1])),
+                            for_back_vel = int(self.pid_z(norm_actuals[2])),
                             yaw_vel = pid_yaw_vel)
 
     def flight_data(self):
