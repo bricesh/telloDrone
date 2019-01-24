@@ -18,7 +18,7 @@ FPS = 20 # --> means an update every 50 ms
 # Logging setup
 log_file_name = 'logs/blackbox-' + time.strftime('%d_%b_%Y_%H_%M_%S') + '.log'
 logging.basicConfig(filename=log_file_name, format='%(asctime)s;%(message)s', level=logging.INFO)
-logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_area')
+logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_side_len')
 
 class FrontEnd(object):
     """ Maintains the Tello display and moves it through the keyboard keys.
@@ -57,6 +57,7 @@ class FrontEnd(object):
         # Create pygame window
         pygame.display.set_caption("Tello video stream")
         self.screen = pygame.display.set_mode([self.screen_width, self.screen_height])
+        self.basicfont = pygame.font.SysFont(None, 32)
 
         # Init Tello object that interacts with the Tello drone
         self.tello = Tello()
@@ -77,15 +78,15 @@ class FrontEnd(object):
         self.mode = "Manual"    #Seek, Manual, Track
         self.pid_x = PID()
         self.pid_x.tunings = (70, 0, 50) #(100, 0, 50)
-        self.pid_x.setpoint = 0.5 #self.screen_width / 2
+        self.pid_x.setpoint = 0.5 #scaled self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
-        self.pid_y.tunings = (70, 20, 50) #(100, 0, 30)
-        self.pid_y.setpoint = 0.5 #self.screen_height / 2
+        self.pid_y.tunings = (60, 0, 40) #(100, 0, 30)
+        self.pid_y.setpoint = 0.5 #scaled self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
-        self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/20
-        self.pid_z.tunings = (0, 0, 0) #(500, 0, 100)
-        self.pid_z.setpoint = 0.05 #int((self.screen_height * self.screen_width) / 20)  #5% of screen
+        self.pid_z = PID()     #depth estimated by length of smallest side of detected object box
+        self.pid_z.tunings = (50, 0, 0) #(500, 0, 100)
+        self.pid_z.setpoint = 0.05 #5% of screen
         self.pid_z.output_limits = (-40, 40)
 
         # Joystick control
@@ -161,10 +162,6 @@ class FrontEnd(object):
                     self.screen.fill([0, 0, 0])
 
                     self.frame = cv2.cvtColor(frame_read.frame, cv2.COLOR_BGR2RGB)
-
-                    if self.show_flight_data:
-                        self.flight_data()
-
                     self.frame = cv2.flip(self.frame, 1)            
 
                     if self.detect_target:
@@ -174,6 +171,10 @@ class FrontEnd(object):
                     self.frame = np.rot90(self.frame)
                     self.frame = pygame.surfarray.make_surface(self.frame)
                     self.screen.blit(self.frame, (0, 0))
+                    
+                    if self.show_flight_data:
+                        self.flight_data()
+
                     pygame.display.update()
 
                     self.update()
@@ -195,7 +196,7 @@ class FrontEnd(object):
             feed_dict={image_tensor: image_np_expanded})
         try:
             target_index = np.where(classes[0] == 47.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
-            target_area, target_area_coord, target_centroid = self.target_area_coord_centroid(
+            target_side_len, target_area_coord, target_centroid = self.target_side_len_coord_centroid(
                 self.screen_width * boxes[0][target_index][1],
                 self.screen_width * boxes[0][target_index][3],
                 self.screen_height * boxes[0][target_index][0],
@@ -209,11 +210,11 @@ class FrontEnd(object):
             if self.mode == "Seek":
                 self.mode = "Track"
 
-            self.target = [target_centroid[0], target_centroid[1], target_area]
+            self.target = [target_centroid[0], target_centroid[1], target_side_len]
 
-            if (abs(self.target[0] - (self.pid_x.setpoint * self.screen_width)) < 20 and 
-                abs(self.target[1] - (self.pid_y.setpoint * self.screen_height)) < 20 and
-                abs(self.target[2] - (self.pid_z.setpoint * self.screen_width * self.screen_height)) < 4000):
+            control_errors = self.control_errors()
+            #print(control_errors)
+            if abs(control_errors[0]) < 20 and abs(control_errors[1]) < 20 and abs(control_errors[2]) < 20:
                 marker_col = (0, 255, 0)
             else:
                 marker_col = (200, 0, 0)
@@ -239,7 +240,7 @@ class FrontEnd(object):
                 if self.target_aquired_tick < 5:
                     self.target = [int(kf_target[0,0]),
                                     int(kf_target[1,0]),
-                                    self.pid_z.setpoint * self.screen_width * self.screen_height] #need to pass predicted area
+                                    int(self.pid_z.setpoint * self.screen_width)] #need to pass predicted area
                 else:
                     self.target_aquired = False
                     self.target = []
@@ -247,61 +248,69 @@ class FrontEnd(object):
                         self.mode = "Seek"
             self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), marker_col, cv2.MARKER_SQUARE)
 
-    def target_area_coord_centroid(self, x1, x2, y1, y2):
+    def target_side_len_coord_centroid(self, x1, x2, y1, y2):
         """
-        Returns the centroid of the given coordinates, the area of the square created by the smallest side
+        Returns the centroid of the given coordinates, the length of the smallest side of the detection box
         and the coordinates of the latter
         """
-        area = None
+        side_len = None
         coord1 = None
         coord2 = None
         centroid = (int(x1 + (x2 - x1) / 2), int(y1 + (y2 - y1) / 2))
         if (x2 - x1) <= (y2 - y1):
-            area = int((x2 - x1)**2)
+            side_len = int(x2 - x1)
             coord1 = (int(centroid[0] - ((x2 - x1) / 2)), int(centroid[1] - ((x2 - x1) / 2)))
             coord2 = (int(centroid[0] + ((x2 - x1) / 2)), int(centroid[1] + ((x2 - x1) / 2)))
         else:
-            area = int((y2 - y1)**2)
+            side_len = int(y2 - y1)
             coord1 = (int(centroid[0] - ((y2 - y1) / 2)), int(centroid[1] - ((y2 - y1) / 2)))
             coord2 = (int(centroid[0] + ((y2 - y1) / 2)), int(centroid[1] + ((y2 - y1) / 2)))
-        return area, (coord1, coord2), centroid
+        return side_len, (coord1, coord2), centroid
 
+    def min_vel(self, vel):
+        if -3 < vel < 3:
+            vel = 0
+        elif 3 <= vel < 7:
+            vel = 7
+        elif -7 < vel <= -3:
+            vel = -7
+        return vel
+    
     def PID_control(self, actual):
         # Normalise actuals
         norm_actuals = [actual[0] / (self.screen_width * 1.0),
             actual[1] / (self.screen_height * 1.0),
-            actual[2] / (self.screen_width * self.screen_height * 1.0)]
+            actual[2] / (self.screen_width * 1.0)]
 
-        # If detected object in first or last 10% of the width of the screen, 
-        # then rotate left and right respectively
-        pid_yaw_vel = 0
-        if norm_actuals[0] <= .1:
-            pid_yaw_vel = -30
-        if norm_actuals[0] >= .9:
-            pid_yaw_vel = 30
-
-        self.set_velocities(left_right_vel = int(self.pid_x(norm_actuals[0])),
-                            up_down_vel = int(self.pid_y(norm_actuals[1])),
-                            for_back_vel = int(self.pid_z(norm_actuals[2])),
-                            yaw_vel = pid_yaw_vel)
+        self.set_velocities(left_right_vel = self.min_vel(int(.6 * self.pid_x(norm_actuals[0]))),
+                            up_down_vel = self.min_vel(int(self.pid_y(norm_actuals[1]))),
+                            for_back_vel = self.min_vel(int(self.pid_z(norm_actuals[2]))),
+                            yaw_vel = self.min_vel(int(.4 * self.pid_x(norm_actuals[0]))))
+    
+    def control_errors(self):
+        return (self.target[0] - (self.pid_x.setpoint * self.screen_width), 
+            self.target[1] - (self.pid_y.setpoint * self.screen_height),
+            self.target[2] - (self.pid_z.setpoint * self.screen_width))
 
     def flight_data(self):
-        """
-        Expand to show more data from tello
-        """
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        bot_left_corner_txt = (10,700)
-        font_scale = 1
-        font_color = (255,255,255)
-        line_type = 2
+        text = "Mode: " + self.mode + ". "
 
-        cv2.putText(self.frame,self.tello.get_battery(), 
-            bot_left_corner_txt, 
-            font, 
-            font_scale,
-            font_color,
-            line_type,
-            cv2.LINE_AA)
+        try:
+            text = text + "Battery: " + self.tello.get_battery().rstrip("\r\n") + "%. "
+        except:
+            text = text + "No battery data! "
+        text = text + "Logging "
+
+        if self.log_to_blackbox:
+            text = text + "On. "
+        else:
+            text = text + "Off. "
+
+        try:
+            rendered_text = self.basicfont.render(text, True, (10, 10, 10))
+            self.screen.blit(rendered_text, (10,680))
+        except:
+            print("Issue with text")
     
     def set_velocities(self, left_right_vel = 999, for_back_vel = 999, up_down_vel = 999, yaw_vel = 999):
         """
@@ -362,9 +371,6 @@ class FrontEnd(object):
             self.set_velocities(yaw_vel = -S)
         elif key == pygame.K_d:  # set yaw counter clockwise velocity
             self.set_velocities(yaw_vel = S)
-        elif key == pygame.K_i:
-            self.pid_x.Kp += 10
-            print(self.pid_x.Kp)
         elif key == pygame.K_m:  # toggle auto pilot on
             self.set_velocities(0, 0, 0, 0) #hover
             if self.mode != "Manual":
@@ -378,10 +384,7 @@ class FrontEnd(object):
         elif key == pygame.K_p:  # toggle logging and increament session id
             self.log_to_blackbox = not self.log_to_blackbox
             if self.log_to_blackbox:
-                print('logging on')
                 self.log_sess_id += 1
-            else:
-                print('logging off')
 
     def keyup(self, key):
         """ Update velocities based on key released
@@ -415,10 +418,7 @@ class FrontEnd(object):
         elif button == 4:
             self.log_to_blackbox = not self.log_to_blackbox
             if self.log_to_blackbox:
-                print('logging on')
                 self.log_sess_id += 1
-            else:
-                print('logging off')
         elif button == 5:
             self.detect_target = not self.detect_target
         elif button == 7:
@@ -458,26 +458,26 @@ class FrontEnd(object):
                                         self.for_back_velocity,
                                         self.up_down_velocity,
                                         self.yaw_velocity)
-            if self.log_to_blackbox:
-                try:
-                    logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
-                            self.log_sess_id,
-                            self.mode,
-                            self.left_right_velocity,
-                            self.for_back_velocity,
-                            self.up_down_velocity,
-                            self.yaw_velocity,
-                            self.target[0],
-                            self.target[1],
-                            self.target[2])
-                except:
-                    logging.info('%s;%s;%s;%s;%s;%s',
-                            self.log_sess_id,
-                            self.mode,
-                            self.left_right_velocity,
-                            self.for_back_velocity,
-                            self.up_down_velocity,
-                            self.yaw_velocity)
+        if self.log_to_blackbox:
+            try:
+                logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
+                        self.log_sess_id,
+                        self.mode,
+                        self.left_right_velocity,
+                        self.for_back_velocity,
+                        self.up_down_velocity,
+                        self.yaw_velocity,
+                        self.target[0],
+                        self.target[1],
+                        self.target[2])
+            except:
+                logging.info('%s;%s;%s;%s;%s;%s',
+                        self.log_sess_id,
+                        self.mode,
+                        self.left_right_velocity,
+                        self.for_back_velocity,
+                        self.up_down_velocity,
+                        self.yaw_velocity)
 def main():
     frontend = FrontEnd()
 
