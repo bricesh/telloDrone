@@ -17,7 +17,7 @@ S = 60
 FPS = 20 # --> means an update every 50 ms
 # Logging setup
 log_file_name = 'logs/blackbox-' + time.strftime('%d_%b_%Y_%H_%M_%S') + '.log'
-logging.basicConfig(filename=log_file_name, format='%(asctime)s.%(msecs)s;%(message)s', level=logging.INFO)
+logging.basicConfig(filename=log_file_name, format='%(asctime)s;%(message)s', level=logging.INFO)
 logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_area')
 
 class FrontEnd(object):
@@ -76,22 +76,25 @@ class FrontEnd(object):
         self.target = []
         self.mode = "Manual"    #Seek, Manual, Track
         self.pid_x = PID()
-        self.pid_x.tunings = (100, 0, 50) #(.1, 0, 1)
+        self.pid_x.tunings = (70, 0, 50) #(100, 0, 50)
         self.pid_x.setpoint = 0.5 #self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
-        self.pid_y.tunings = (100, 0, 30)
+        self.pid_y.tunings = (70, 20, 50) #(100, 0, 30)
         self.pid_y.setpoint = 0.5 #self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth control estimated by size of detect object e.g. size ~= (screen height x width)/20
-        self.pid_z.tunings = (500, 0, 100)
+        self.pid_z.tunings = (0, 0, 0) #(500, 0, 100)
         self.pid_z.setpoint = 0.05 #int((self.screen_height * self.screen_width) / 20)  #5% of screen
         self.pid_z.output_limits = (-40, 40)
 
         # Joystick control
-        pygame.joystick.init()
-        self.joystick = pygame.joystick.Joystick(0)
-        self.joystick.init()
+        try:
+            pygame.joystick.init()
+            self.joystick = pygame.joystick.Joystick(0)
+            self.joystick.init()
+        except:
+            print("no joystick")
 
         # Instantiate OCV kalman filter
         self.kf = cv2.KalmanFilter(4, 2)
@@ -108,7 +111,7 @@ class FrontEnd(object):
         self.send_rc_control = False
 
         # create update timer
-        pygame.time.set_timer(USEREVENT + 1, int(1000/(FPS + 1)))
+        self.clock = pygame.time.Clock()
 
     def run(self):
 
@@ -136,12 +139,8 @@ class FrontEnd(object):
         with self.detection_graph.as_default():
             with tf.Session(graph=self.detection_graph) as sess:
                 while not should_stop:
-
                     for event in pygame.event.get():
-                        if event.type == USEREVENT + 1:
-                            self.update()
-                            logging.info('update called at %s', time.ctime())
-                        elif event.type == QUIT:
+                        if event.type == QUIT:
                             should_stop = True
                         elif event.type == KEYDOWN:
                             if event.key == K_ESCAPE:
@@ -177,7 +176,8 @@ class FrontEnd(object):
                     self.screen.blit(self.frame, (0, 0))
                     pygame.display.update()
 
-                    time.sleep(1.0 / FPS) # Could improve taking into account time to execute code...
+                    self.update()
+                    self.clock.tick(FPS)
 
         # Call it always before finishing. I deallocate resources.
         self.tello.end()
@@ -362,6 +362,9 @@ class FrontEnd(object):
             self.set_velocities(yaw_vel = -S)
         elif key == pygame.K_d:  # set yaw counter clockwise velocity
             self.set_velocities(yaw_vel = S)
+        elif key == pygame.K_i:
+            self.pid_x.Kp += 10
+            print(self.pid_x.Kp)
         elif key == pygame.K_m:  # toggle auto pilot on
             self.set_velocities(0, 0, 0, 0) #hover
             if self.mode != "Manual":
@@ -431,13 +434,13 @@ class FrontEnd(object):
             self.set_velocities(up_down_vel = int(value * -60))
         if axis == 2:
             # cw = -1; ccw = 1
-            self.set_velocities(yaw_vel = int(value * -80))
+            self.set_velocities(yaw_vel = int(value * -60))
         if axis == 3:
             # for = -1; back = 1
             self.set_velocities(for_back_vel = int(value * -60))
         if axis == 4:
             # left = -1; right = 1
-            self.set_velocities(left_right_vel = int(value * 80))
+            self.set_velocities(left_right_vel = int(value * 60))
 
     def update(self):
         if self.mode == "Seek":
