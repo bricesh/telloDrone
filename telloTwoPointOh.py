@@ -17,7 +17,7 @@ S = 60
 FPS = 20 # --> means an update every 50 ms
 # Logging setup
 log_file_name = 'logs/blackbox-' + time.strftime('%d_%b_%Y_%H_%M_%S') + '.log'
-logging.basicConfig(filename=log_file_name, format='%(asctime)s;%(message)s', level=logging.INFO)
+logging.basicConfig(filename=log_file_name, format='%(asctime)s.%(msecs)s;%(message)s', level=logging.INFO)
 logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_area')
 
 class FrontEnd(object):
@@ -87,10 +87,11 @@ class FrontEnd(object):
         self.pid_z.tunings = (500, 0, 100)
         self.pid_z.setpoint = 0.05 #int((self.screen_height * self.screen_width) / 20)  #5% of screen
         self.pid_z.output_limits = (-40, 40)
-        # Improve by normalising the measurements and actuals!!
 
-        # Virtual joystick control
-        #self.joystick_engaged = False
+        # Joystick control
+        pygame.joystick.init()
+        self.joystick = pygame.joystick.Joystick(0)
+        self.joystick.init()
 
         # Instantiate OCV kalman filter
         self.kf = cv2.KalmanFilter(4, 2)
@@ -139,6 +140,7 @@ class FrontEnd(object):
                     for event in pygame.event.get():
                         if event.type == USEREVENT + 1:
                             self.update()
+                            logging.info('update called at %s', time.ctime())
                         elif event.type == QUIT:
                             should_stop = True
                         elif event.type == KEYDOWN:
@@ -148,11 +150,10 @@ class FrontEnd(object):
                                 self.keydown(event.key)
                         elif event.type == KEYUP:
                             self.keyup(event.key)
-                        # elif event.type == MOUSEBUTTONDOWN:
-                        #     self.joystick_engaged = True
-                        # elif event.type == MOUSEBUTTONUP:
-                        #     self.joystick_engaged = False
-                        #     self.set_velocities(0, 0, 0, 0) #hover
+                        elif event.type == pygame.JOYBUTTONDOWN:
+                            self.js_keydown(event.button)
+                        if event.type == pygame.JOYAXISMOTION:
+                            self.js_axismotion(event.axis, event.value)
 
                     if frame_read.stopped:
                         frame_read.stop()
@@ -176,7 +177,7 @@ class FrontEnd(object):
                     self.screen.blit(self.frame, (0, 0))
                     pygame.display.update()
 
-                    time.sleep(1 / FPS) # Could improve taking into account time to execute code...
+                    time.sleep(1.0 / FPS) # Could improve taking into account time to execute code...
 
         # Call it always before finishing. I deallocate resources.
         self.tello.end()
@@ -236,7 +237,9 @@ class FrontEnd(object):
                 kf_target = self.kf.predict()
                 marker_col = (0, 255, 0)
                 if self.target_aquired_tick < 5:
-                    self.target = [int(kf_target[0,0]), int(kf_target[1,0]), self.pid_z.setpoint] #need to pass predicted area
+                    self.target = [int(kf_target[0,0]),
+                                    int(kf_target[1,0]),
+                                    self.pid_z.setpoint * self.screen_width * self.screen_height] #need to pass predicted area
                 else:
                     self.target_aquired = False
                     self.target = []
@@ -314,12 +317,6 @@ class FrontEnd(object):
             self.up_down_velocity = up_down_vel
         if yaw_vel != 999:
             self.yaw_velocity = yaw_vel
-
-    # def fly_with_mouse(self):
-    #     mouse_pos = pygame.mouse.get_pos()
-    #     x_vel = (mouse_pos[0] - (self.screen_width/2))/8    # maxes out at +60 or -60
-    #     y_vel = -(mouse_pos[1] - (self.screen_height/2))/6  # maxes out at +60 or -60
-    #     self.set_velocities(left_right_vel = int(x_vel), up_down_vel = int(y_vel))
 
     def seek_target(self):
         """
@@ -403,10 +400,46 @@ class FrontEnd(object):
             self.tello.land()
             self.send_rc_control = False
 
-    def update(self):
-        # if self.joystick_engaged == True:
-        #     self.fly_with_mouse()
+    def js_keydown(self, button):
+        if button == 0:
+            self.set_velocities(0, 0, 0, 0) #hover
+            if self.mode != "Manual":
+                self.mode = "Manual"
+            else:
+                self.mode = "Seek"
+        elif button == 1:
+            self.show_flight_data = not self.show_flight_data
+        elif button == 4:
+            self.log_to_blackbox = not self.log_to_blackbox
+            if self.log_to_blackbox:
+                print('logging on')
+                self.log_sess_id += 1
+            else:
+                print('logging off')
+        elif button == 5:
+            self.detect_target = not self.detect_target
+        elif button == 7:
+            self.tello.takeoff()
+            self.send_rc_control = True
+        elif button == 6:
+            self.tello.land()
+            self.send_rc_control = False
 
+    def js_axismotion(self, axis, value):
+        if axis == 1:
+            # up = -1; down = 1
+            self.set_velocities(up_down_vel = int(value * -60))
+        if axis == 2:
+            # cw = -1; ccw = 1
+            self.set_velocities(yaw_vel = int(value * -80))
+        if axis == 3:
+            # for = -1; back = 1
+            self.set_velocities(for_back_vel = int(value * -60))
+        if axis == 4:
+            # left = -1; right = 1
+            self.set_velocities(left_right_vel = int(value * 80))
+
+    def update(self):
         if self.mode == "Seek":
             self.set_velocities(0 ,0, 0, 0) #hover
             self.seek_tick = 0
@@ -422,27 +455,26 @@ class FrontEnd(object):
                                         self.for_back_velocity,
                                         self.up_down_velocity,
                                         self.yaw_velocity)
-        
-        if self.log_to_blackbox:
-            try:
-                logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
-                        self.log_sess_id,
-                        self.mode,
-                        self.left_right_velocity,
-                        self.for_back_velocity,
-                        self.up_down_velocity,
-                        self.yaw_velocity,
-                        self.target[0],
-                        self.target[1],
-                        self.target[2])
-            except:
-                logging.info('%s;%s;%s;%s;%s;%s',
-                        self.log_sess_id,
-                        self.mode,
-                        self.left_right_velocity,
-                        self.for_back_velocity,
-                        self.up_down_velocity,
-                        self.yaw_velocity)
+            if self.log_to_blackbox:
+                try:
+                    logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
+                            self.log_sess_id,
+                            self.mode,
+                            self.left_right_velocity,
+                            self.for_back_velocity,
+                            self.up_down_velocity,
+                            self.yaw_velocity,
+                            self.target[0],
+                            self.target[1],
+                            self.target[2])
+                except:
+                    logging.info('%s;%s;%s;%s;%s;%s',
+                            self.log_sess_id,
+                            self.mode,
+                            self.left_right_velocity,
+                            self.for_back_velocity,
+                            self.up_down_velocity,
+                            self.yaw_velocity)
 def main():
     frontend = FrontEnd()
 
