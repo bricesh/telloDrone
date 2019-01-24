@@ -5,6 +5,7 @@ import time
 import os
 import tensorflow as tf
 import logging
+from keras.models import model_from_json
 
 from djitellopy import Tello
 from utils import label_map_util
@@ -35,7 +36,7 @@ class FrontEnd(object):
             - P toggle logging
     """
 
-    def __init__(self):
+    def __init__(self):   
         # Model preparation 
         MODEL_NAME = 'ssd_mobilenet_v1_coco'
         PATH_TO_CKPT = MODEL_NAME + '/frozen_inference_graph.pb'  # Path to frozen detection graph. This is the actual model that is used for the object detection.
@@ -85,9 +86,21 @@ class FrontEnd(object):
         self.pid_y.setpoint = 0.5 #scaled self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth estimated by length of smallest side of detected object box
-        self.pid_z.tunings = (50, 0, 0) #(500, 0, 100)
+        self.pid_z.tunings = (50, 0, 30) #(500, 0, 100)
         self.pid_z.setpoint = 0.05 #5% of screen
         self.pid_z.output_limits = (-40, 40)
+
+        # Using ANN as controller
+        # load json and create model
+        json_file = open('model.json', 'r')
+        loaded_model_json = json_file.read()
+        json_file.close()
+        self.loaded_model = model_from_json(loaded_model_json)
+        # load weights into new model
+        self.loaded_model.load_weights("model.h5")
+        self.loaded_model.compile(loss='mean_squared_error', optimizer='adam', metrics = ['mse'])
+        self.loaded_model._make_predict_function()
+        print("Loaded controller model from disk")
 
         # Joystick control
         try:
@@ -236,6 +249,16 @@ class FrontEnd(object):
             else:
                 self.target_aquired_tick += 1
                 kf_target = self.kf.predict()
+                
+                if kf_target[0,0] < 0:
+                    kf_target[0,0] = 0
+                if kf_target[0,0] > self.screen_width:
+                    kf_target[0,0] = self.screen_width
+                if kf_target[1,0] < 0:
+                    kf_target[1,0] = 0
+                if kf_target[1,0] > self.screen_height:
+                    kf_target[1,0] = self.screen_height
+
                 marker_col = (0, 255, 0)
                 if self.target_aquired_tick < 5:
                     self.target = [int(kf_target[0,0]),
@@ -275,6 +298,24 @@ class FrontEnd(object):
         elif -7 < vel <= -3:
             vel = -7
         return vel
+    
+    def ANN_control(self, actual):
+        # Normalise actuals
+        norm_actuals = [actual[0] / (self.screen_width * 1.0),
+            actual[2] / (self.screen_width * 1.0),
+            actual[1] / (self.screen_height * 1.0)]
+        print(np.array([norm_actuals]))
+        ann_ctr_cmd = self.loaded_model.predict(np.array([norm_actuals]),
+                                        batch_size=None,
+                                        verbose=0,
+                                        steps=None)[0]
+        print(ann_ctr_cmd)
+        
+        self.set_velocities(left_right_vel = self.min_vel(int(.6 * ann_ctr_cmd[0])),
+                            up_down_vel = self.min_vel(int(ann_ctr_cmd[1])),
+                            for_back_vel = self.min_vel(int(ann_ctr_cmd[2])),
+                            yaw_vel = self.min_vel(int(.4 * ann_ctr_cmd[0])))
+        
     
     def PID_control(self, actual):
         # Normalise actuals
@@ -450,7 +491,8 @@ class FrontEnd(object):
             self.seek_target()
         elif self.mode == "Track":
             self.set_velocities(0, 0, 0, 0) #hover
-            self.PID_control(self.target)
+            self.ANN_control(self.target)
+            #self.PID_control(self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:
