@@ -111,7 +111,7 @@ class FrontEnd(object):
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth estimated by length of smallest side of detected object box
         self.pid_z.tunings = (150, 0, 90)
-        self.pid_z.setpoint = 0.1 #10% of screen
+        self.pid_z.setpoint = 0.25 #10% of screen
         self.pid_z.output_limits = (-40, 40)
        
         # Joystick control
@@ -323,10 +323,10 @@ class FrontEnd(object):
             feed_dict={self.ctr_input: np.array([norm_actuals])})[0]
         print(ann_ctr_cmd) #remove
         
-        self.set_velocities(left_right_vel = self.min_vel(int(60 * ann_ctr_cmd[0])),
-                            up_down_vel = self.min_vel(int(60 * ann_ctr_cmd[1])),
-                            for_back_vel = self.min_vel(int(60 * ann_ctr_cmd[2])),
-                            yaw_vel = self.min_vel(int(60 * ann_ctr_cmd[0])))        
+        self.set_velocities(left_right_vel = self.min_vel(int(40 * ann_ctr_cmd[0])),
+                            up_down_vel = self.min_vel(int(40 * ann_ctr_cmd[2])),
+                            for_back_vel = self.min_vel(int(40 * ann_ctr_cmd[1])),
+                            yaw_vel = self.min_vel(int(40 * ann_ctr_cmd[3])))        
     
     def PID_control(self, actual):
         # Normalise actuals
@@ -483,6 +483,9 @@ class FrontEnd(object):
             self.send_rc_control = False
 
     def js_axismotion(self, axis, value):
+        if axis == 0:
+            # cw = -1; ccw = 1
+            self.set_velocities(yaw_vel = int(value * 60))
         if axis == 1:
             # up = -1; down = 1
             self.set_velocities(up_down_vel = int(value * -60))
@@ -503,8 +506,8 @@ class FrontEnd(object):
             self.seek_target()
         elif self.mode == "Track":
             self.set_velocities(0, 0, 0, 0) #hover
-            #self.ANN_control(self.target, ctr_sess)
-            self.PID_control(self.target)
+            self.ANN_control(self.target, ctr_sess)
+            #self.PID_control(self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:

@@ -24,5 +24,8 @@ model = baseline_model()
 model.fit(X, Y, epochs=50, batch_size=10, verbose=1)
 print("ANN trained")
 
-model.save("model_from_pid.h5")
+model.save("ann_controller/model_from_pid.h5")
 print("Saved model to disk")
+#
+#python keras_to_tf --input_model="ann_controller/model_from_pid.h5" --output_model="ann_controller/controller_model.pb"
+#
