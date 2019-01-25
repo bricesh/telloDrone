@@ -6,6 +6,7 @@ import os
 import tensorflow as tf
 import logging
 from keras.models import model_from_json
+from keras import backend as K
 
 from djitellopy import Tello
 from utils import label_map_util
@@ -19,7 +20,7 @@ FPS = 20 # --> means an update every 50 ms
 # Logging setup
 log_file_name = 'logs/blackbox-' + time.strftime('%d_%b_%Y_%H_%M_%S') + '.log'
 logging.basicConfig(filename=log_file_name, format='%(asctime)s;%(message)s', level=logging.INFO)
-logging.info('timestamp;sess_id;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_side_len')
+logging.info('timestamp;mode;left_right_vel;for_back_vel;up_down_vel;yaw_vel;target_x;target_y;target_side_len')
 
 class FrontEnd(object):
     """ Maintains the Tello display and moves it through the keyboard keys.
@@ -37,7 +38,7 @@ class FrontEnd(object):
     """
 
     def __init__(self):   
-        # Model preparation 
+        # Object Detection model preparation 
         MODEL_NAME = 'ssd_mobilenet_v1_coco'
         PATH_TO_CKPT = MODEL_NAME + '/frozen_inference_graph.pb'  # Path to frozen detection graph. This is the actual model that is used for the object detection.
 
@@ -49,7 +50,31 @@ class FrontEnd(object):
                 serialized_graph = fid.read()
                 od_graph_def.ParseFromString(serialized_graph)
                 tf.import_graph_def(od_graph_def, name='')
+        
+        self.image_tensor = self.detection_graph.get_tensor_by_name('image_tensor:0')
+        self.boxes = self.detection_graph.get_tensor_by_name('detection_boxes:0')
+        self.classes = self.detection_graph.get_tensor_by_name('detection_classes:0')
+        print("Loaded object detection model from disk")
 
+        # Controller model preparation 
+        CTR_PATH_TO_CKPT = 'ann_controller/controller_model.pb'  # Path to frozen detection graph. This is the actual model that is used for the object detection.
+
+        # Load a (frozen) Tensorflow model into memory.
+        self.controller_graph = tf.Graph()
+        with self.controller_graph.as_default():
+            ctr_graph_def = tf.GraphDef()
+            with tf.gfile.GFile(CTR_PATH_TO_CKPT, 'rb') as fid:
+                serialized_graph = fid.read()
+                ctr_graph_def.ParseFromString(serialized_graph)
+                tf.import_graph_def(ctr_graph_def, name='')
+            #op = self.controller_graph.get_operations()
+            #[print(m.values()) for m in op]
+            #[print(m.name) for m in op]
+        
+        self.ctr_input = self.controller_graph.get_tensor_by_name('dense_1_input:0')
+        self.ctr_output = self.controller_graph.get_tensor_by_name('dense_3/BiasAdd:0')
+        print("Loaded controller model from disk")
+        
         # Init pygame
         pygame.init()
         self.screen_width = 960
@@ -65,7 +90,6 @@ class FrontEnd(object):
 
         # Logging init
         self.log_to_blackbox = False
-        self.log_sess_id = 0
 
         # Drone velocities between -100~100
         self.set_velocities(0, 0, 0, 0) #hover
@@ -78,30 +102,18 @@ class FrontEnd(object):
         self.target = []
         self.mode = "Manual"    #Seek, Manual, Track
         self.pid_x = PID()
-        self.pid_x.tunings = (70, 0, 50) #(100, 0, 50)
+        self.pid_x.tunings = (70, 0, 50)
         self.pid_x.setpoint = 0.5 #scaled self.screen_width / 2
         self.pid_x.output_limits = (-40, 40)
         self.pid_y = PID()
-        self.pid_y.tunings = (60, 0, 40) #(100, 0, 30)
+        self.pid_y.tunings = (90, 0, 60) #(60, 0, 40)
         self.pid_y.setpoint = 0.5 #scaled self.screen_height / 2
         self.pid_y.output_limits = (-40, 40)
         self.pid_z = PID()     #depth estimated by length of smallest side of detected object box
-        self.pid_z.tunings = (50, 0, 30) #(500, 0, 100)
-        self.pid_z.setpoint = 0.05 #5% of screen
+        self.pid_z.tunings = (150, 0, 90)
+        self.pid_z.setpoint = 0.1 #10% of screen
         self.pid_z.output_limits = (-40, 40)
-
-        # Using ANN as controller
-        # load json and create model
-        json_file = open('model.json', 'r')
-        loaded_model_json = json_file.read()
-        json_file.close()
-        self.loaded_model = model_from_json(loaded_model_json)
-        # load weights into new model
-        self.loaded_model.load_weights("model.h5")
-        self.loaded_model.compile(loss='mean_squared_error', optimizer='adam', metrics = ['mse'])
-        self.loaded_model._make_predict_function()
-        print("Loaded controller model from disk")
-
+       
         # Joystick control
         try:
             pygame.joystick.init()
@@ -151,47 +163,49 @@ class FrontEnd(object):
         should_stop = False
         
         with self.detection_graph.as_default():
-            with tf.Session(graph=self.detection_graph) as sess:
-                while not should_stop:
-                    for event in pygame.event.get():
-                        if event.type == QUIT:
-                            should_stop = True
-                        elif event.type == KEYDOWN:
-                            if event.key == K_ESCAPE:
-                                should_stop = True
-                            else:
-                                self.keydown(event.key)
-                        elif event.type == KEYUP:
-                            self.keyup(event.key)
-                        elif event.type == pygame.JOYBUTTONDOWN:
-                            self.js_keydown(event.button)
-                        if event.type == pygame.JOYAXISMOTION:
-                            self.js_axismotion(event.axis, event.value)
+            with tf.Session(graph=self.detection_graph) as od_sess:
+                with self.controller_graph.as_default():
+                    with tf.Session(graph=self.controller_graph) as ctr_sess:
+                        while not should_stop:
+                            for event in pygame.event.get():
+                                if event.type == QUIT:
+                                    should_stop = True
+                                elif event.type == KEYDOWN:
+                                    if event.key == K_ESCAPE:
+                                        should_stop = True
+                                    else:
+                                        self.keydown(event.key)
+                                elif event.type == KEYUP:
+                                    self.keyup(event.key)
+                                elif event.type == pygame.JOYBUTTONDOWN:
+                                    self.js_keydown(event.button)
+                                if event.type == pygame.JOYAXISMOTION:
+                                    self.js_axismotion(event.axis, event.value)
 
-                    if frame_read.stopped:
-                        frame_read.stop()
-                        break
+                            if frame_read.stopped:
+                                frame_read.stop()
+                                break
 
-                    self.screen.fill([0, 0, 0])
+                            self.screen.fill([0, 0, 0])
 
-                    self.frame = cv2.cvtColor(frame_read.frame, cv2.COLOR_BGR2RGB)
-                    self.frame = cv2.flip(self.frame, 1)            
+                            self.frame = cv2.cvtColor(frame_read.frame, cv2.COLOR_BGR2RGB)
+                            self.frame = cv2.flip(self.frame, 1)            
 
-                    if self.detect_target:
-                        self.get_target(sess)                 
-                    
-                    self.frame = cv2.circle(self.frame, (int(self.screen_width/2), int(self.screen_height/2)), 30, 100, 4)
-                    self.frame = np.rot90(self.frame)
-                    self.frame = pygame.surfarray.make_surface(self.frame)
-                    self.screen.blit(self.frame, (0, 0))
-                    
-                    if self.show_flight_data:
-                        self.flight_data()
+                            if self.detect_target:
+                                self.get_target(od_sess)                 
+                            
+                            self.frame = cv2.circle(self.frame, (int(self.screen_width/2), int(self.screen_height/2)), 30, 100, 4)
+                            self.frame = np.rot90(self.frame)
+                            self.frame = pygame.surfarray.make_surface(self.frame)
+                            self.screen.blit(self.frame, (0, 0))
+                            
+                            if self.show_flight_data:
+                                self.flight_data()
 
-                    pygame.display.update()
+                            pygame.display.update()
 
-                    self.update()
-                    self.clock.tick(FPS)
+                            self.update(ctr_sess)
+                            self.clock.tick(FPS)
 
         # Call it always before finishing. I deallocate resources.
         self.tello.end()
@@ -200,13 +214,10 @@ class FrontEnd(object):
         frame_small = cv2.resize(self.frame, (int(self.screen_width/2),int(self.screen_height/2)))
         # Expand dimensions since the model expects images to have shape: [1, None, None, 3]
         image_np_expanded = np.expand_dims(frame_small, axis=0)
-        image_tensor = self.detection_graph.get_tensor_by_name('image_tensor:0')
-        boxes = self.detection_graph.get_tensor_by_name('detection_boxes:0')
-        classes = self.detection_graph.get_tensor_by_name('detection_classes:0')
         # Actual detection.
         (boxes, classes) = sess.run(
-            [boxes, classes],
-            feed_dict={image_tensor: image_np_expanded})
+            [self.boxes, self.classes],
+            feed_dict={self.image_tensor: image_np_expanded})
         try:
             target_index = np.where(classes[0] == 47.)[0][0]  #43 = Tennis Racket, 47 = Cup, 33 = suitcase, 44= bottle
             target_side_len, target_area_coord, target_centroid = self.target_side_len_coord_centroid(
@@ -226,7 +237,7 @@ class FrontEnd(object):
             self.target = [target_centroid[0], target_centroid[1], target_side_len]
 
             control_errors = self.control_errors()
-            #print(control_errors)
+            print(control_errors) #remove
             if abs(control_errors[0]) < 20 and abs(control_errors[1]) < 20 and abs(control_errors[2]) < 20:
                 marker_col = (0, 255, 0)
             else:
@@ -269,6 +280,7 @@ class FrontEnd(object):
                     self.target = []
                     if self.mode == "Track":
                         self.mode = "Seek"
+                        self.seek_tick = 0
             self.frame = cv2.drawMarker(self.frame, (kf_target[0,0], kf_target[1,0]), marker_col, cv2.MARKER_SQUARE)
 
     def target_side_len_coord_centroid(self, x1, x2, y1, y2):
@@ -299,23 +311,22 @@ class FrontEnd(object):
             vel = -7
         return vel
     
-    def ANN_control(self, actual):
+    def ANN_control(self, actual, sess):
         # Normalise actuals
         norm_actuals = [actual[0] / (self.screen_width * 1.0),
             actual[2] / (self.screen_width * 1.0),
             actual[1] / (self.screen_height * 1.0)]
-        print(np.array([norm_actuals]))
-        ann_ctr_cmd = self.loaded_model.predict(np.array([norm_actuals]),
-                                        batch_size=None,
-                                        verbose=0,
-                                        steps=None)[0]
-        print(ann_ctr_cmd)
+
+        # Actual detection.
+        ann_ctr_cmd = sess.run(
+            self.ctr_output,
+            feed_dict={self.ctr_input: np.array([norm_actuals])})[0]
+        print(ann_ctr_cmd) #remove
         
-        self.set_velocities(left_right_vel = self.min_vel(int(.6 * ann_ctr_cmd[0])),
-                            up_down_vel = self.min_vel(int(ann_ctr_cmd[1])),
-                            for_back_vel = self.min_vel(int(ann_ctr_cmd[2])),
-                            yaw_vel = self.min_vel(int(.4 * ann_ctr_cmd[0])))
-        
+        self.set_velocities(left_right_vel = self.min_vel(int(60 * ann_ctr_cmd[0])),
+                            up_down_vel = self.min_vel(int(60 * ann_ctr_cmd[1])),
+                            for_back_vel = self.min_vel(int(60 * ann_ctr_cmd[2])),
+                            yaw_vel = self.min_vel(int(60 * ann_ctr_cmd[0])))        
     
     def PID_control(self, actual):
         # Normalise actuals
@@ -351,7 +362,7 @@ class FrontEnd(object):
             rendered_text = self.basicfont.render(text, True, (10, 10, 10))
             self.screen.blit(rendered_text, (10,680))
         except:
-            print("Issue with text")
+            print("Issue with text e.g. null")
     
     def set_velocities(self, left_right_vel = 999, for_back_vel = 999, up_down_vel = 999, yaw_vel = 999):
         """
@@ -376,7 +387,7 @@ class FrontEnd(object):
             3. back to 1.
         """
         seek_speed = 40
-        self.set_velocities(yaw_vel = seek_speed)
+        #self.set_velocities(yaw_vel = seek_speed)
         # Timings for a complete 360 deg at various rotational velocities
         # 20 = 39s
         # 30 = 22s
@@ -384,12 +395,14 @@ class FrontEnd(object):
         # 50 = 10s
 
         self.seek_tick += 1
-        if self.seek_tick == 220:
+        if self.seek_tick <= 15:
+            self.set_velocities(0, 0, 0, 0)
+        elif self.seek_tick <= 200:
+            self.set_velocities(yaw_vel = seek_speed)
+        elif 200 < self.seek_tick < 215:
             self.set_velocities(up_down_vel = seek_speed)
+        elif self.seek_tick == 215:
             self.seek_tick = 0
-            print("up!!")
-        if self.seek_tick == 15:
-            self.set_velocities(up_down_vel = 0)
 
     def keydown(self, key):
         """ Update velocities based on key pressed
@@ -422,10 +435,10 @@ class FrontEnd(object):
             self.show_flight_data = not self.show_flight_data
         elif key == pygame.K_u:  # toggle detect object
             self.detect_target = not self.detect_target
+            if self.mode != "Manual" and not self.detect_target:
+                self.mode = "Manual"
         elif key == pygame.K_p:  # toggle logging and increament session id
             self.log_to_blackbox = not self.log_to_blackbox
-            if self.log_to_blackbox:
-                self.log_sess_id += 1
 
     def keyup(self, key):
         """ Update velocities based on key released
@@ -458,10 +471,10 @@ class FrontEnd(object):
             self.show_flight_data = not self.show_flight_data
         elif button == 4:
             self.log_to_blackbox = not self.log_to_blackbox
-            if self.log_to_blackbox:
-                self.log_sess_id += 1
         elif button == 5:
             self.detect_target = not self.detect_target
+            if self.mode != "Manual" and not self.detect_target:
+                self.mode = "Manual"
         elif button == 7:
             self.tello.takeoff()
             self.send_rc_control = True
@@ -483,16 +496,15 @@ class FrontEnd(object):
             # left = -1; right = 1
             self.set_velocities(left_right_vel = int(value * 60))
 
-    def update(self):
+    def update(self, ctr_sess):
         if self.mode == "Seek":
             self.set_velocities(0 ,0, 0, 0) #hover
-            self.seek_tick = 0
             self.detect_target = True
             self.seek_target()
         elif self.mode == "Track":
             self.set_velocities(0, 0, 0, 0) #hover
-            self.ANN_control(self.target)
-            #self.PID_control(self.target)
+            #self.ANN_control(self.target, ctr_sess)
+            self.PID_control(self.target)
 
         """ Update routine. Send velocities to Tello."""
         if self.send_rc_control:
@@ -502,8 +514,7 @@ class FrontEnd(object):
                                         self.yaw_velocity)
         if self.log_to_blackbox:
             try:
-                logging.info('%s;%s;%s;%s;%s;%s;%s;%s;%s',
-                        self.log_sess_id,
+                logging.info('%s;%s;%s;%s;%s;%s;%s;%s',
                         self.mode,
                         self.left_right_velocity,
                         self.for_back_velocity,
@@ -513,8 +524,7 @@ class FrontEnd(object):
                         self.target[1],
                         self.target[2])
             except:
-                logging.info('%s;%s;%s;%s;%s;%s',
-                        self.log_sess_id,
+                logging.info('%s;%s;%s;%s;%s',
                         self.mode,
                         self.left_right_velocity,
                         self.for_back_velocity,
